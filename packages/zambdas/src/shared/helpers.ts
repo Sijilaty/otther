@@ -19,7 +19,7 @@ import { DateTime } from 'luxon';
 import { BILLING_RESOURCE_TAG, PRIVATE_EXTENSION_BASE_URL, PUBLIC_EXTENSION_BASE_URL } from 'utils/lib/fhir/constants';
 import { undefinedIfEmptyArray } from 'utils/lib/fhir/helpers';
 import { pickFirstValueFromAnswerItem } from 'utils/lib/helpers/paperwork/paperwork';
-import { getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
+import { getOptionalSecret, getSecret, Secrets, SecretsKeys } from 'utils/lib/secrets';
 import { TELEMED_VIDEO_ROOM_CODE, TIMEZONES } from 'utils/lib/types/constants';
 import { EncounterVirtualServiceExtension } from 'utils/lib/types/data/oystehr-api.types.ts/telemed.types';
 import { findQuestionnaireResponseItemLinkId } from 'utils/lib/types/data/paperwork/paperwork.types';
@@ -28,7 +28,17 @@ import { getTimezone } from 'utils/lib/utils/scheduleUtils';
 import { ZambdaInput } from './types/common';
 import { safeJsonParse } from './validation';
 
-export const fhirApiUrlFromAuth0Audience = (auth0Audience: string): string => {
+// Sijil: upstream derives both backend URLs purely from the Auth0 audience via
+// the switch below, which only knows *.zapehr.com and throws on anything else.
+// We run against Medplum behind our own Go gateway, so there is no zapehr
+// audience to map. Honour the explicit FHIR_API / PROJECT_API secrets when they
+// are set (both already exist in SecretsKeys) and fall back to upstream's
+// mapping otherwise, so this stays a superset of upstream behaviour.
+export const fhirApiUrlFromAuth0Audience = (auth0Audience: string, secrets?: Secrets | null): string => {
+  const configured = secrets !== undefined ? getOptionalSecret(SecretsKeys.FHIR_API, secrets) : undefined;
+  if (configured) {
+    return configured;
+  }
   switch (auth0Audience) {
     case 'https://dev.api.zapehr.com':
       return 'https://dev.fhir-api.zapehr.com';
@@ -46,7 +56,11 @@ export const fhirApiUrlFromAuth0Audience = (auth0Audience: string): string => {
 };
 
 // todo remove code duplication with configure-secrets
-export const projectApiUrlFromAuth0Audience = (auth0Audience: string): string => {
+export const projectApiUrlFromAuth0Audience = (auth0Audience: string, secrets?: Secrets | null): string => {
+  const configured = secrets !== undefined ? getOptionalSecret(SecretsKeys.PROJECT_API, secrets) : undefined;
+  if (configured) {
+    return configured;
+  }
   switch (auth0Audience) {
     case 'https://dev.api.zapehr.com':
       return 'https://dev.project-api.zapehr.com/v1';
@@ -71,8 +85,8 @@ export function createClinicalOystehrClient(
   return new Oystehr({
     accessToken: token,
     services: {
-      fhirApiUrl: fhirApiUrlFromAuth0Audience(getSecret(SecretsKeys.AUTH0_AUDIENCE, secrets)),
-      projectApiUrl: projectApiUrlFromAuth0Audience(getSecret(SecretsKeys.AUTH0_AUDIENCE, secrets)),
+      fhirApiUrl: fhirApiUrlFromAuth0Audience(getSecret(SecretsKeys.AUTH0_AUDIENCE, secrets), secrets),
+      projectApiUrl: projectApiUrlFromAuth0Audience(getSecret(SecretsKeys.AUTH0_AUDIENCE, secrets), secrets),
     },
     ...overrides,
     ignoreTags: [...(overrides?.ignoreTags ?? []), BILLING_RESOURCE_TAG],
