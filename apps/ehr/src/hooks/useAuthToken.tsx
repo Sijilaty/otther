@@ -10,6 +10,18 @@ let _token: string | undefined = undefined;
 const IS_LOCAL = import.meta.env.VITE_APP_IS_LOCAL === 'true';
 const GATEWAY_LOGIN_URL = `${import.meta.env.VITE_APP_PROJECT_API_URL}/auth/login`;
 
+/**
+ * In-flight de-duplication. The effect below re-runs on every render whose
+ * useAuth0() identities change, and `_token` is only assigned once the request
+ * resolves — so without memoising the promise, each render starts another login
+ * while the previous is still in flight, and each resolution re-renders. That is
+ * a self-sustaining request storm (observed: 60+ logins and React's
+ * "Maximum update depth exceeded" before the first paint). Memoising means one
+ * network call no matter how many times the effect fires; a failure clears the
+ * memo so a later render can legitimately retry.
+ */
+let _pending: Promise<string | undefined> | undefined = undefined;
+
 async function fetchLocalToken(): Promise<string> {
   const res = await fetch(GATEWAY_LOGIN_URL, {
     method: 'POST',
@@ -27,34 +39,57 @@ async function fetchLocalToken(): Promise<string> {
   return token;
 }
 
+function localTokenOnce(): Promise<string | undefined> {
+  _pending ??= fetchLocalToken()
+    .then((token) => {
+      _token = token;
+      return token;
+    })
+    .catch((error) => {
+      console.error('Unable to get a token from the Sijil gateway', error);
+      _pending = undefined; // allow a retry rather than wedging on one failure
+      return undefined;
+    });
+  return _pending;
+}
+
 export function useAuthToken(): string | undefined {
   const { isAuthenticated, getAccessTokenSilently } = useAuth0();
   const [token, setToken] = useState<string | undefined>(_token);
 
   useEffect(() => {
+    let active = true;
+    const apply = (newToken: string | undefined): void => {
+      if (active && newToken) {
+        setToken(newToken);
+      }
+    };
+
     if (_token) {
+      apply(_token);
       return;
     }
 
     if (IS_LOCAL) {
-      fetchLocalToken()
-        .then((newToken) => {
-          _token = newToken;
-          setToken(newToken);
-        })
-        .catch((error) => console.error('Unable to get a token from the Sijil gateway', error));
-      return;
+      void localTokenOnce().then(apply);
+      return () => {
+        active = false;
+      };
     }
 
     if (isAuthenticated) {
       getAccessTokenSilently()
         .then((newToken) => {
           _token = newToken;
-          setToken(newToken);
+          apply(newToken);
         })
         .catch(() => console.error('Unable to get auth0 token'));
     }
-  }, [isAuthenticated, getAccessTokenSilently, setToken]);
+
+    return () => {
+      active = false;
+    };
+  }, [isAuthenticated, getAccessTokenSilently]);
 
   return token;
 }
